@@ -21,9 +21,7 @@ enum OkError {
     InternalError(String),
 }
 
-
 pub async fn run_nu(line: String) -> String {
-
     let context = create_default_context();
     match context {
         Ok(ctx) => {
@@ -48,43 +46,6 @@ pub async fn run_nu(line: String) -> String {
     }
 }
 
-
-
-
-
-
-
-
-
-
-/*
-old code
-
-pub async fn run_nu(line: String) -> String {
-    let context = create_default_context();
-    match context {
-        Ok(mut ctx) => {
-            // print the command to help debug unhandled errors
-            println!("processing line {}", &line);
-            ctx.add_commands(vec![whole_stream_command(echo::Echo)]);
-            match parse_and_eval(&line, &mut ctx).await {
-                Ok(val) => match serde_json::to_string(&OkError::Ok(val)) {
-                    Ok(output) => output,
-                    Err(e) => format!("Error converting to json: {:?}", e),
-                },
-                Err(e) => match serde_json::to_string(&OkError::Error(e)) {
-                    Ok(output) => output,
-                    Err(e) => format!("Error converting to json: {:?}", e),
-                },
-            }
-        }
-        Err(e) => match serde_json::to_string(&OkError::InternalError(format!("{}", e))) {
-            Ok(output) => output,
-            Err(e) => format!("Error converting to json: {:?}", e),
-        },
-    }
-}
-*/
 pub fn parse_and_eval(line: &str, ctx: &EvaluationContext) -> Result<String, ShellError> {
     // FIXME: do we still need this?
     let line = if let Some(s) = line.strip_suffix('\n') {
