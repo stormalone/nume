@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     lex::tokens::LiteCommand,
     parse::{classify_block, util::trim_quotes},
@@ -14,6 +16,7 @@ use crate::lex::lexer::{lex, parse_block};
 use crate::ParserScope;
 
 use self::signature::parse_signature;
+pub use self::signature::{lex_split_baseline_tokens_on, parse_parameter};
 
 mod data_structs;
 mod primitives;
@@ -26,10 +29,6 @@ pub(crate) fn parse_definition(call: &LiteCommand, scope: &dyn ParserScope) -> O
     // prototypes of adjacent commands are also available
 
     if call.parts.len() == 4 {
-        if call.parts.len() != 4 {
-            return Some(ParseError::mismatch("definition", call.parts[0].clone()));
-        }
-
         if call.parts[0].item != "def" {
             return Some(ParseError::mismatch("definition", call.parts[0].clone()));
         }
@@ -64,8 +63,11 @@ pub(crate) fn parse_definition(call: &LiteCommand, scope: &dyn ParserScope) -> O
                 let (mut block, err) = classify_block(&lite_block, scope);
                 scope.exit_scope();
 
-                block.params = signature;
-                block.params.name = name;
+                if let Some(block) = std::sync::Arc::<nu_protocol::hir::Block>::get_mut(&mut block)
+                {
+                    block.params = signature;
+                    block.params.name = name;
+                }
 
                 scope.add_definition(block);
 
@@ -75,7 +77,9 @@ pub(crate) fn parse_definition(call: &LiteCommand, scope: &dyn ParserScope) -> O
         }
     } else {
         Some(ParseError::internal_error(
-            "need a block".to_string().spanned(call.span()),
+            "Wrong shape. Expected def name [signature] {body}."
+                .to_string()
+                .spanned(call.span()),
         ))
     }
 }
@@ -100,7 +104,12 @@ pub(crate) fn parse_definition_prototype(
         err = error;
     }
 
-    scope.add_definition(Block::new(signature, vec![], IndexMap::new(), call.span()));
+    scope.add_definition(Arc::new(Block::new(
+        signature,
+        vec![],
+        IndexMap::new(),
+        call.span(),
+    )));
 
     err
 }

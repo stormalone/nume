@@ -62,19 +62,15 @@ impl<'a, T: Plugin> PluginTest<'a, T> {
         self.configure(|flags_configured| {
             let flags_registered = &call_stub.args.named;
 
-            let flag_passed = match flags_registered {
-                Some(names) => Some(names.keys().map(String::from).collect::<Vec<String>>()),
-                None => None,
-            };
+            let flag_passed = flags_registered
+                .as_ref()
+                .map(|names| names.keys().map(String::from).collect::<Vec<String>>());
 
             if let Some(flags) = flag_passed {
                 for flag in flags {
                     assert!(
                         flags_configured.iter().any(|f| *f == flag),
-                        format!(
-                            "The flag you passed ({}) is not configured in the plugin.",
-                            flag
-                        )
+                        "The flag you passed is not configured in the plugin.",
                     );
                 }
             }
@@ -116,7 +112,7 @@ impl CallStub {
     }
 
     pub fn with_parameter(&mut self, name: &str) -> Result<&mut Self, ShellError> {
-        let cp = column_path(&name)
+        let cp = column_path(name)
             .as_column_path()
             .expect("Failed! Expected valid column path.");
         let cp = UntaggedValue::Primitive(Primitive::ColumnPath(cp.item)).into_value(cp.tag);
@@ -143,7 +139,7 @@ pub fn expect_return_value_at(
     for (idx, item) in return_values.iter().enumerate() {
         let item = match item {
             Ok(return_value) => return_value,
-            Err(reason) => panic!(format!("{}", reason)),
+            Err(_) => panic!("Unexpected value"),
         };
 
         if idx == at {
@@ -155,9 +151,5 @@ pub fn expect_return_value_at(
         }
     }
 
-    panic!(format!(
-        "Couldn't get return value from stream at {}. (There are {} items)",
-        at,
-        return_values.len() - 1
-    ))
+    panic!("Couldn't get return value from stream.")
 }

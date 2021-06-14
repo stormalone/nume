@@ -1,5 +1,5 @@
 use crate::wrap::{column_width, split_sublines, wrap, Alignment, Subline, WrappedCell};
-use ansi_term::{Color, Style};
+use nu_ansi_term::{Color, Style};
 use std::collections::HashMap;
 
 enum SeparatorPosition {
@@ -631,7 +631,7 @@ impl WrappedTable {
         &self,
         separator_position: SeparatorPosition,
         color_hm: &HashMap<String, Style>,
-    ) {
+    ) -> String {
         let column_count = self.column_widths.len();
         let mut output = String::new();
         let sep_color = color_hm
@@ -773,15 +773,21 @@ impl WrappedTable {
                 }
             }
         }
-
-        println!("{}", output);
+        output.push('\n');
+        output
     }
 
-    fn print_cell_contents(&self, cells: &[WrappedCell], color_hm: &HashMap<String, Style>) {
+    fn print_cell_contents(
+        &self,
+        cells: &[WrappedCell],
+        color_hm: &HashMap<String, Style>,
+    ) -> String {
         let sep_color = color_hm
             .get("separator_color")
             .unwrap_or(&Style::default())
             .to_owned();
+
+        let mut total_output = String::new();
 
         for current_line in 0.. {
             let mut lines_printed = 0;
@@ -859,30 +865,37 @@ impl WrappedTable {
             if lines_printed == 0 {
                 break;
             } else {
-                println!("{}", output);
+                total_output.push_str(output.as_str());
+                total_output.push('\n');
             }
         }
+        total_output
     }
 
-    fn print_table(&self, color_hm: &HashMap<String, Style>) {
+    fn print_table(&self, color_hm: &HashMap<String, Style>) -> String {
+        let mut output = String::new();
+
         #[cfg(windows)]
         {
-            let _ = ansi_term::enable_ansi_support();
+            let _ = nu_ansi_term::enable_ansi_support();
         }
 
         if self.data.is_empty() {
-            return;
+            return output;
         }
 
         if self.theme.print_top_border {
-            self.print_separator(SeparatorPosition::Top, &color_hm);
+            output.push_str(
+                self.print_separator(SeparatorPosition::Top, color_hm)
+                    .as_str(),
+            );
         }
 
         let skip_headers = (self.headers.len() == 2 && self.headers[1].max_width == 0)
             || (self.headers.len() == 1 && self.headers[0].max_width == 0);
 
         if !self.headers.is_empty() && !skip_headers {
-            self.print_cell_contents(&self.headers, &color_hm);
+            output.push_str(self.print_cell_contents(&self.headers, color_hm).as_str());
         }
 
         let mut first_row = true;
@@ -890,22 +903,32 @@ impl WrappedTable {
         for row in &self.data {
             if !first_row {
                 if self.theme.separate_rows {
-                    self.print_separator(SeparatorPosition::Middle, &color_hm);
+                    output.push_str(
+                        self.print_separator(SeparatorPosition::Middle, color_hm)
+                            .as_str(),
+                    )
                 }
             } else {
                 first_row = false;
 
                 if self.theme.separate_header && !self.headers.is_empty() && !skip_headers {
-                    self.print_separator(SeparatorPosition::Middle, &color_hm);
+                    output.push_str(
+                        self.print_separator(SeparatorPosition::Middle, color_hm)
+                            .as_str(),
+                    );
                 }
             }
 
-            self.print_cell_contents(row, &color_hm);
+            output.push_str(self.print_cell_contents(row, color_hm).as_str());
         }
 
         if self.theme.print_bottom_border {
-            self.print_separator(SeparatorPosition::Bottom, &color_hm);
+            output.push_str(
+                self.print_separator(SeparatorPosition::Bottom, color_hm)
+                    .as_str(),
+            );
         }
+        output
     }
 }
 
@@ -995,7 +1018,7 @@ pub fn maybe_truncate_columns(termwidth: usize, processed_table: &mut ProcessedT
     }
 }
 
-pub fn draw_table(table: &Table, termwidth: usize, color_hm: &HashMap<String, Style>) {
+pub fn draw_table(table: &Table, termwidth: usize, color_hm: &HashMap<String, Style>) -> String {
     // Remove the edges, if used
     let termwidth = if table.theme.print_left_border && table.theme.print_right_border {
         termwidth - 2
@@ -1018,7 +1041,7 @@ pub fn draw_table(table: &Table, termwidth: usize, color_hm: &HashMap<String, St
         if !table.data.is_empty() && !table.data[0].is_empty() {
             table.data[0].len()
         } else {
-            return;
+            return String::new();
         }
     } else {
         headers_len
@@ -1050,12 +1073,12 @@ pub fn draw_table(table: &Table, termwidth: usize, color_hm: &HashMap<String, St
     let wrapped_table = wrap_cells(
         processed_table,
         max_column_width,
-        &color_hm,
+        color_hm,
         &re_leading,
         &re_trailing,
     );
 
-    wrapped_table.print_table(&color_hm);
+    wrapped_table.print_table(color_hm)
 }
 
 fn wrap_cells(
@@ -1088,9 +1111,9 @@ fn wrap_cells(
             let (mut lines, inner_max_width) = wrap(
                 max_column_width,
                 contents.into_iter(),
-                &color_hm,
-                &re_leading,
-                &re_trailing,
+                color_hm,
+                re_leading,
+                re_trailing,
             );
             wrapped.lines.append(&mut lines);
             if inner_max_width > wrapped.max_width {
@@ -1116,9 +1139,9 @@ fn wrap_cells(
                 let (mut lines, inner_max_width) = wrap(
                     max_column_width,
                     contents.into_iter(),
-                    &color_hm,
-                    &re_leading,
-                    &re_trailing,
+                    color_hm,
+                    re_leading,
+                    re_trailing,
                 );
                 wrapped.lines.append(&mut lines);
                 if inner_max_width > wrapped.max_width {

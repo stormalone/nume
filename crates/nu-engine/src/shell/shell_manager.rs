@@ -1,8 +1,7 @@
-use crate::command_args::EvaluatedWholeStreamCommandArgs;
-use crate::maybe_text_codec::StringOrBinary;
 use crate::shell::Shell;
-use futures::Stream;
-use nu_stream::OutputStream;
+use crate::{filesystem::filesystem_shell::FilesystemShellMode, maybe_text_codec::StringOrBinary};
+use crate::{CommandArgs, FilesystemShell};
+use nu_stream::{ActionStream, OutputStream};
 
 use crate::shell::shell_args::{CdArgs, CopyArgs, LsArgs, MkdirArgs, MvArgs, RemoveArgs};
 use encoding_rs::Encoding;
@@ -13,13 +12,29 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct ShellManager {
     pub current_shell: Arc<AtomicUsize>,
     pub shells: Arc<Mutex<Vec<Box<dyn Shell + Send>>>>,
 }
 
 impl ShellManager {
+    pub fn basic() -> ShellManager {
+        ShellManager {
+            current_shell: Arc::new(AtomicUsize::new(0)),
+            shells: Arc::new(Mutex::new(vec![Box::new(FilesystemShell::basic(
+                FilesystemShellMode::Cli,
+            ))])),
+        }
+    }
+
+    pub fn enter_script_mode(&self) -> Result<(), std::io::Error> {
+        //New fs_shell starting from current path
+        let fs_shell = FilesystemShell::with_location(self.path(), FilesystemShellMode::Script)?;
+        self.insert_at_current(Box::new(fs_shell));
+        Ok(())
+    }
+
     pub fn insert_at_current(&self, shell: Box<dyn Shell + Send>) {
         self.shells.lock().push(shell);
         self.current_shell
@@ -55,11 +70,15 @@ impl ShellManager {
         self.shells.lock().is_empty()
     }
 
+    pub fn is_interactive(&self) -> bool {
+        self.shells.lock()[self.current_shell()].is_interactive()
+    }
+
     pub fn path(&self) -> String {
         self.shells.lock()[self.current_shell()].path()
     }
 
-    pub fn pwd(&self, args: EvaluatedWholeStreamCommandArgs) -> Result<OutputStream, ShellError> {
+    pub fn pwd(&self, args: CommandArgs) -> Result<ActionStream, ShellError> {
         let env = self.shells.lock();
 
         env[self.current_shell()].pwd(args)
@@ -74,8 +93,10 @@ impl ShellManager {
         full_path: &Path,
         name: Span,
         with_encoding: Option<&'static Encoding>,
-    ) -> Result<impl Stream<Item = Result<StringOrBinary, ShellError>> + Send + 'static, ShellError>
-    {
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<StringOrBinary, ShellError>> + Send + Sync>,
+        ShellError,
+    > {
         self.shells.lock()[self.current_shell()].open(full_path, name, with_encoding)
     }
 
@@ -125,40 +146,40 @@ impl ShellManager {
         args: LsArgs,
         name: Tag,
         ctrl_c: Arc<AtomicBool>,
-    ) -> Result<OutputStream, ShellError> {
+    ) -> Result<ActionStream, ShellError> {
         let env = self.shells.lock();
 
         env[self.current_shell()].ls(args, name, ctrl_c)
     }
 
-    pub fn cd(&self, args: CdArgs, name: Tag) -> Result<OutputStream, ShellError> {
+    pub fn cd(&self, args: CdArgs, name: Tag) -> Result<ActionStream, ShellError> {
         let env = self.shells.lock();
 
         env[self.current_shell()].cd(args, name)
     }
 
-    pub fn cp(&self, args: CopyArgs, name: Tag) -> Result<OutputStream, ShellError> {
+    pub fn cp(&self, args: CopyArgs, name: Tag) -> Result<ActionStream, ShellError> {
         let shells = self.shells.lock();
 
         let path = shells[self.current_shell()].path();
         shells[self.current_shell()].cp(args, name, &path)
     }
 
-    pub fn rm(&self, args: RemoveArgs, name: Tag) -> Result<OutputStream, ShellError> {
+    pub fn rm(&self, args: RemoveArgs, name: Tag) -> Result<ActionStream, ShellError> {
         let shells = self.shells.lock();
 
         let path = shells[self.current_shell()].path();
         shells[self.current_shell()].rm(args, name, &path)
     }
 
-    pub fn mkdir(&self, args: MkdirArgs, name: Tag) -> Result<OutputStream, ShellError> {
+    pub fn mkdir(&self, args: MkdirArgs, name: Tag) -> Result<ActionStream, ShellError> {
         let shells = self.shells.lock();
 
         let path = shells[self.current_shell()].path();
         shells[self.current_shell()].mkdir(args, name, &path)
     }
 
-    pub fn mv(&self, args: MvArgs, name: Tag) -> Result<OutputStream, ShellError> {
+    pub fn mv(&self, args: MvArgs, name: Tag) -> Result<ActionStream, ShellError> {
         let shells = self.shells.lock();
 
         let path = shells[self.current_shell()].path();

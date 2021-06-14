@@ -1,9 +1,15 @@
 mod conf;
+mod config_trust;
+mod local_config;
 mod nuconfig;
-
-pub mod tests;
+pub mod path;
 
 pub use conf::Conf;
+pub use config_trust::is_file_trusted;
+pub use config_trust::read_trusted;
+pub use config_trust::Trusted;
+pub use local_config::loadable_cfg_exists_in_dir;
+pub use local_config::LocalConfigDiff;
 pub use nuconfig::NuConfig;
 
 use indexmap::IndexMap;
@@ -87,7 +93,8 @@ fn helper(v: &Value) -> Result<toml::Value, ShellError> {
         UntaggedValue::Primitive(Primitive::Decimal(f)) => {
             toml::Value::Float(f.tagged(&v.tag).coerce_into("converting to TOML float")?)
         }
-        UntaggedValue::Primitive(Primitive::Int(i)) => {
+        UntaggedValue::Primitive(Primitive::Int(i)) => toml::Value::Integer(*i),
+        UntaggedValue::Primitive(Primitive::BigInt(i)) => {
             toml::Value::Integer(i.tagged(&v.tag).coerce_into("converting to TOML integer")?)
         }
         UntaggedValue::Primitive(Primitive::Nothing) => {
@@ -102,16 +109,15 @@ fn helper(v: &Value) -> Result<toml::Value, ShellError> {
             path.iter()
                 .map(|x| match &x.unspanned {
                     UnspannedPathMember::String(string) => Ok(toml::Value::String(string.clone())),
-                    UnspannedPathMember::Int(int) => Ok(toml::Value::Integer(
-                        int.tagged(&v.tag)
-                            .coerce_into("converting to TOML integer")?,
-                    )),
+                    UnspannedPathMember::Int(int) => Ok(toml::Value::Integer(*int)),
                 })
                 .collect::<Result<Vec<toml::Value>, ShellError>>()?,
         ),
         UntaggedValue::Table(l) => toml::Value::Array(collect_values(l)?),
         UntaggedValue::Error(e) => return Err(e.clone()),
         UntaggedValue::Block(_) => toml::Value::String("<Block>".to_string()),
+        #[cfg(feature = "dataframe")]
+        UntaggedValue::DataFrame(_) => toml::Value::String("<DataFrame>".to_string()),
         UntaggedValue::Primitive(Primitive::Range(_)) => toml::Value::String("<Range>".to_string()),
         UntaggedValue::Primitive(Primitive::Binary(b)) => {
             toml::Value::Array(b.iter().map(|x| toml::Value::Integer(*x as i64)).collect())
@@ -296,14 +302,11 @@ pub fn config(tag: impl Into<Tag>) -> Result<IndexMap<String, Value>, ShellError
 }
 
 pub fn write(config: &IndexMap<String, Value>, at: &Option<PathBuf>) -> Result<(), ShellError> {
-    let filename = &mut default_path()?;
+    let filename = default_path()?;
+
     let filename = match at {
         None => filename,
-        Some(file) => {
-            filename.pop();
-            filename.push(file);
-            filename
-        }
+        Some(ref file) => file.clone(),
     };
 
     let contents = value_to_toml_value(
@@ -323,4 +326,8 @@ fn touch(path: &Path) -> io::Result<()> {
         Ok(_) => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+pub fn cfg_path_to_scope_tag(cfg_path: &Path) -> String {
+    cfg_path.to_string_lossy().to_string()
 }

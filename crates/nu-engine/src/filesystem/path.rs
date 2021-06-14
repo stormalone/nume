@@ -1,6 +1,25 @@
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+pub fn resolve_dots<P>(path: P) -> PathBuf
+where
+    P: AsRef<Path>,
+{
+    let mut result = PathBuf::new();
+
+    path.as_ref()
+        .components()
+        .for_each(|component| match component {
+            Component::ParentDir => {
+                result.pop();
+            }
+            Component::CurDir => {}
+            _ => result.push(component),
+        });
+
+    dunce::simplified(&result).to_path_buf()
+}
+
 pub fn absolutize<P, Q>(relative_to: P, path: Q) -> PathBuf
 where
     P: AsRef<Path>,
@@ -11,6 +30,17 @@ where
         // more ugly - so we don't do anything, which should result in an equal
         // path on all supported systems.
         relative_to.as_ref().to_owned()
+    } else if path.as_ref().starts_with("~") {
+        #[cfg(feature = "dirs")]
+        {
+            let expanded_path = expand_tilde(path.as_ref());
+            match expanded_path {
+                Some(p) => p,
+                _ => path.as_ref().to_owned(),
+            }
+        }
+        #[cfg(not(feature = "dirs"))]
+        relative_to.as_ref().join(path)
     } else {
         relative_to.as_ref().join(path)
     };
@@ -29,7 +59,10 @@ where
 
             (absolute, relative)
         } else {
-            (relative_to.as_ref().to_path_buf(), path)
+            (
+                relative_to.as_ref().to_path_buf(),
+                components.iter().collect::<PathBuf>(),
+            )
         }
     };
 
@@ -49,6 +82,32 @@ where
     };
 
     dunce::simplified(&path).to_path_buf()
+}
+
+// borrowed from here https://stackoverflow.com/questions/54267608/expand-tilde-in-rust-path-idiomatically
+#[cfg(feature = "dirs")]
+pub fn expand_tilde<P: AsRef<Path>>(path_user_input: P) -> Option<PathBuf> {
+    let p = path_user_input.as_ref();
+    if !p.starts_with("~") {
+        return Some(p.to_path_buf());
+    }
+
+    if p == Path::new("~") {
+        return dirs_next::home_dir();
+    }
+
+    dirs_next::home_dir().map(|mut h| {
+        if h == Path::new("/") {
+            // Corner case: `h` root directory;
+            // don't prepend extra `/`, just drop the tilde.
+            p.strip_prefix("~")
+                .expect("cannot strip ~ prefix")
+                .to_path_buf()
+        } else {
+            h.push(p.strip_prefix("~/").expect("cannot strip ~/ prefix"));
+            h
+        }
+    })
 }
 
 pub fn canonicalize<P, Q>(relative_to: P, path: Q) -> io::Result<PathBuf>
@@ -89,6 +148,17 @@ mod tests {
             PathBuf::from("/foo"), // missing path
             absolutize(relative_to, path)
         );
+    }
+
+    #[test]
+    fn absolutize_with_curdir() {
+        let relative_to = Path::new("/foo");
+        let path = Path::new("./bar/./baz");
+
+        assert!(!absolutize(relative_to, path)
+            .to_str()
+            .unwrap()
+            .contains('.'));
     }
 
     #[test]

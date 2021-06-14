@@ -45,7 +45,7 @@ impl From<AbsoluteFile> for PathBuf {
 }
 
 pub struct AbsolutePath {
-    inner: PathBuf,
+    pub inner: PathBuf,
 }
 
 impl AbsolutePath {
@@ -196,8 +196,8 @@ pub fn delete_file_at(full_path: impl AsRef<Path>) {
 pub fn create_file_at(full_path: impl AsRef<Path>) -> Result<(), std::io::Error> {
     let full_path = full_path.as_ref();
 
-    if let Some(parent) = full_path.parent() {
-        panic!(format!("{:?} exists", parent.display()));
+    if full_path.parent().is_some() {
+        panic!("path exists");
     }
 
     std::fs::write(full_path, b"fake data")
@@ -246,14 +246,23 @@ pub fn root() -> PathBuf {
 }
 
 pub fn binaries() -> PathBuf {
+    let mut build_type = "debug";
+    if !cfg!(debug_assertions) {
+        build_type = "release"
+    }
+
     std::env::var("CARGO_TARGET_DIR")
         .ok()
-        .map(|target_dir| PathBuf::from(target_dir).join("debug"))
-        .unwrap_or_else(|| root().join("target/debug"))
+        .map(|target_dir| PathBuf::from(target_dir).join(&build_type))
+        .unwrap_or_else(|| root().join(format!("target/{}", &build_type)))
 }
 
 pub fn fixtures() -> PathBuf {
     root().join("tests/fixtures")
+}
+
+pub fn assets() -> PathBuf {
+    root().join("tests/assets")
 }
 
 pub fn in_directory(str: impl AsRef<Path>) -> String {

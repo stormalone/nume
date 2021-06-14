@@ -1,7 +1,7 @@
 use std::cmp::{Ord, Ordering, PartialOrd};
-use std::convert::From;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::{convert::From, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
@@ -10,18 +10,18 @@ use crate::{hir, Dictionary, PositionalType, Primitive, SyntaxShape, UntaggedVal
 use crate::{PathMember, ShellTypeName};
 use derive_new::new;
 
-use nu_errors::ParseError;
+use nu_errors::{ParseError, ShellError};
 use nu_source::{
     DbgDocBldr, DebugDocBuilder, HasSpan, PrettyDebug, PrettyDebugRefineKind, PrettyDebugWithSource,
 };
 use nu_source::{IntoSpanned, Span, Spanned, SpannedItem, Tag};
 
-use bigdecimal::BigDecimal;
+use bigdecimal::{BigDecimal, ToPrimitive};
 use indexmap::IndexMap;
 use log::trace;
 use num_bigint::{BigInt, ToBigInt};
 use num_traits::identities::Zero;
-use num_traits::{FromPrimitive, ToPrimitive};
+use num_traits::FromPrimitive;
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash, Serialize, Deserialize)]
 pub struct InternalCommand {
@@ -53,14 +53,14 @@ impl InternalCommand {
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash, Serialize, Deserialize)]
 pub struct ClassifiedBlock {
-    pub block: Block,
+    pub block: Arc<Block>,
     // this is not a Result to make it crystal clear that these shapes
     // aren't intended to be used directly with `?`
     pub failed: Option<ParseError>,
 }
 
 impl ClassifiedBlock {
-    pub fn new(block: Block, failed: Option<ParseError>) -> ClassifiedBlock {
+    pub fn new(block: Arc<Block>, failed: Option<ParseError>) -> ClassifiedBlock {
         ClassifiedBlock { block, failed }
     }
 }
@@ -159,12 +159,12 @@ impl Group {
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash, Serialize, Deserialize)]
 pub struct CapturedBlock {
-    pub block: Block,
+    pub block: Arc<Block>,
     pub captured: Dictionary,
 }
 
 impl CapturedBlock {
-    pub fn new(block: Block, captured: Dictionary) -> Self {
+    pub fn new(block: Arc<Block>, captured: Dictionary) -> Self {
         Self { block, captured }
     }
 }
@@ -173,7 +173,7 @@ impl CapturedBlock {
 pub struct Block {
     pub params: Signature,
     pub block: Vec<Group>,
-    pub definitions: IndexMap<String, Block>,
+    pub definitions: IndexMap<String, Arc<Block>>,
     pub span: Span,
 }
 
@@ -181,7 +181,7 @@ impl Block {
     pub fn new(
         params: Signature,
         block: Vec<Group>,
-        definitions: IndexMap<String, Block>,
+        definitions: IndexMap<String, Arc<Block>>,
         span: Span,
     ) -> Block {
         Block {
@@ -204,16 +204,6 @@ impl Block {
     pub fn push(&mut self, group: Group) {
         self.block.push(group);
         self.infer_params();
-    }
-
-    pub fn set_redirect(&mut self, external_redirection: ExternalRedirection) {
-        if let Some(group) = self.block.last_mut() {
-            if let Some(pipeline) = group.pipelines.last_mut() {
-                if let Some(ClassifiedCommand::Internal(internal)) = pipeline.list.last_mut() {
-                    internal.args.external_redirection = external_redirection;
-                }
-            }
-        }
     }
 
     pub fn has_it_usage(&self) -> bool {
@@ -325,10 +315,10 @@ impl ExternalCommand {
     pub fn has_it_usage(&self) -> bool {
         self.args.iter().any(|arg| match arg {
             SpannedExpression {
-                expr: Expression::Path(path),
+                expr: Expression::FullColumnPath(path),
                 ..
             } => {
-                let Path { head, .. } = &**path;
+                let FullColumnPath { head, .. } = &**path;
                 matches!(head, SpannedExpression{expr: Expression::Variable(x, ..), ..} if x == "$it")
             }
             _ => false,
@@ -356,6 +346,8 @@ pub enum Unit {
     Kibibyte,
     Mebibyte,
     Gibibyte,
+    Tebibyte,
+    Pebibyte,
 
     // Duration units
     Nanosecond,
@@ -366,14 +358,12 @@ pub enum Unit {
     Hour,
     Day,
     Week,
-    Month,
-    Year,
 }
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone, Hash, Deserialize, Serialize)]
 pub enum Member {
     String(/* outer */ Span, /* inner */ Span),
-    Int(BigInt, Span),
+    Int(i64, Span),
     Bare(Spanned<String>),
 }
 
@@ -381,7 +371,7 @@ impl Member {
     pub fn to_path_member(&self) -> PathMember {
         match self {
             //Member::String(outer, inner) => PathMember::string(inner.slice(source), *outer),
-            Member::Int(int, span) => PathMember::int(int.clone(), *span),
+            Member::Int(int, span) => PathMember::int(*int, *span),
             Member::Bare(spanned_string) => {
                 PathMember::string(spanned_string.item.clone(), spanned_string.span)
             }
@@ -412,13 +402,46 @@ impl HasSpan for Member {
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone, Hash, Deserialize, Serialize)]
 pub enum Number {
-    Int(BigInt),
+    BigInt(BigInt),
+    Int(i64),
     Decimal(BigDecimal),
+}
+
+impl Number {
+    pub fn to_i64(&self) -> Result<i64, ShellError> {
+        match self {
+            Number::BigInt(bi) => match bi.to_i64() {
+                Some(i) => Ok(i),
+                None => Err(ShellError::untagged_runtime_error(
+                    "Cannot convert bigint to i64, too large",
+                )),
+            },
+            Number::Int(i) => Ok(*i),
+            Number::Decimal(_) => Err(ShellError::untagged_runtime_error(
+                "Cannont convert decimal to i64",
+            )),
+        }
+    }
+    pub fn to_u64(&self) -> Result<u64, ShellError> {
+        match self {
+            Number::BigInt(bi) => match bi.to_u64() {
+                Some(i) => Ok(i),
+                None => Err(ShellError::untagged_runtime_error(
+                    "Cannot convert bigint to u64, too large",
+                )),
+            },
+            Number::Int(i) => Ok(*i as u64),
+            Number::Decimal(_) => Err(ShellError::untagged_runtime_error(
+                "Cannont convert decimal to u64",
+            )),
+        }
+    }
 }
 
 impl PrettyDebug for Number {
     fn pretty(&self) -> DebugDocBuilder {
         match self {
+            Number::BigInt(int) => DbgDocBldr::primitive(int),
             Number::Int(int) => DbgDocBldr::primitive(int),
             Number::Decimal(decimal) => DbgDocBldr::primitive(decimal),
         }
@@ -430,13 +453,13 @@ macro_rules! primitive_int {
         $(
             impl From<$ty> for Number {
                 fn from(int: $ty) -> Number {
-                    Number::Int(BigInt::zero() + int)
+                    Number::BigInt(BigInt::zero() + int)
                 }
             }
 
             impl From<&$ty> for Number {
                 fn from(int: &$ty) -> Number {
-                    Number::Int(BigInt::zero() + *int)
+                    Number::BigInt(BigInt::zero() + *int)
                 }
             }
         )*
@@ -479,8 +502,13 @@ impl std::ops::Mul for Number {
     fn mul(self, other: Number) -> Number {
         match (self, other) {
             (Number::Int(a), Number::Int(b)) => Number::Int(a * b),
+            (Number::BigInt(a), Number::Int(b)) => Number::BigInt(a * BigInt::from(b)),
+            (Number::Int(a), Number::BigInt(b)) => Number::BigInt(BigInt::from(a) * b),
+            (Number::BigInt(a), Number::BigInt(b)) => Number::BigInt(a * b),
             (Number::Int(a), Number::Decimal(b)) => Number::Decimal(BigDecimal::from(a) * b),
             (Number::Decimal(a), Number::Int(b)) => Number::Decimal(a * BigDecimal::from(b)),
+            (Number::BigInt(a), Number::Decimal(b)) => Number::Decimal(BigDecimal::from(a) * b),
+            (Number::Decimal(a), Number::BigInt(b)) => Number::Decimal(a * BigDecimal::from(b)),
             (Number::Decimal(a), Number::Decimal(b)) => Number::Decimal(a * b),
         }
     }
@@ -492,6 +520,7 @@ impl std::ops::Mul<u32> for Number {
 
     fn mul(self, other: u32) -> Number {
         match self {
+            Number::BigInt(left) => Number::BigInt(left * (other as i64)),
             Number::Int(left) => Number::Int(left * (other as i64)),
             Number::Decimal(left) => Number::Decimal(left * BigDecimal::from(other)),
         }
@@ -501,7 +530,8 @@ impl std::ops::Mul<u32> for Number {
 impl ToBigInt for Number {
     fn to_bigint(&self) -> Option<BigInt> {
         match self {
-            Number::Int(int) => Some(int.clone()),
+            Number::Int(int) => Some(BigInt::from(*int)),
+            Number::BigInt(int) => Some(int.clone()),
             // The BigDecimal to BigInt conversion always return Some().
             // FIXME: This conversion might not be want we want, it just remove the scale.
             Number::Decimal(decimal) => decimal.to_bigint(),
@@ -512,25 +542,6 @@ impl ToBigInt for Number {
 impl PrettyDebug for Unit {
     fn pretty(&self) -> DebugDocBuilder {
         DbgDocBldr::keyword(self.as_str())
-    }
-}
-
-pub fn convert_number_to_u64(number: &Number) -> u64 {
-    match number {
-        Number::Int(big_int) => {
-            if let Some(x) = big_int.to_u64() {
-                x
-            } else {
-                unreachable!("Internal error: convert_number_to_u64 given incompatible number")
-            }
-        }
-        Number::Decimal(big_decimal) => {
-            if let Some(x) = big_decimal.to_u64() {
-                x
-            } else {
-                unreachable!("Internal error: convert_number_to_u64 given incompatible number")
-            }
-        }
     }
 }
 
@@ -546,6 +557,8 @@ impl Unit {
             Unit::Kibibyte => "KiB",
             Unit::Mebibyte => "MiB",
             Unit::Gibibyte => "GiB",
+            Unit::Tebibyte => "TiB",
+            Unit::Pebibyte => "PiB",
             Unit::Nanosecond => "ns",
             Unit::Microsecond => "us",
             Unit::Millisecond => "ms",
@@ -554,8 +567,6 @@ impl Unit {
             Unit::Hour => "hr",
             Unit::Day => "day",
             Unit::Week => "wk",
-            Unit::Month => "mon",
-            Unit::Year => "yr",
         }
     }
 
@@ -563,18 +574,18 @@ impl Unit {
         let size = size.clone();
 
         match self {
-            Unit::Byte => filesize(convert_number_to_u64(&size)),
-            Unit::Kilobyte => filesize(convert_number_to_u64(&size) * 1000),
-            Unit::Megabyte => filesize(convert_number_to_u64(&size) * 1000 * 1000),
-            Unit::Gigabyte => filesize(convert_number_to_u64(&size) * 1000 * 1000 * 1000),
-            Unit::Terabyte => filesize(convert_number_to_u64(&size) * 1000 * 1000 * 1000 * 1000),
-            Unit::Petabyte => {
-                filesize(convert_number_to_u64(&size) * 1000 * 1000 * 1000 * 1000 * 1000)
-            }
+            Unit::Byte => filesize(size),
+            Unit::Kilobyte => filesize(size * 1000),
+            Unit::Megabyte => filesize(size * 1000 * 1000),
+            Unit::Gigabyte => filesize(size * 1000 * 1000 * 1000),
+            Unit::Terabyte => filesize(size * 1000 * 1000 * 1000 * 1000),
+            Unit::Petabyte => filesize(size * 1000 * 1000 * 1000 * 1000 * 1000),
 
-            Unit::Kibibyte => filesize(convert_number_to_u64(&size) * 1024),
-            Unit::Mebibyte => filesize(convert_number_to_u64(&size) * 1024 * 1024),
-            Unit::Gibibyte => filesize(convert_number_to_u64(&size) * 1024 * 1024 * 1024),
+            Unit::Kibibyte => filesize(size * 1024),
+            Unit::Mebibyte => filesize(size * 1024 * 1024),
+            Unit::Gibibyte => filesize(size * 1024 * 1024 * 1024),
+            Unit::Tebibyte => filesize(size * 1024 * 1024 * 1024 * 1024),
+            Unit::Pebibyte => filesize(size * 1024 * 1024 * 1024 * 1024 * 1024),
 
             Unit::Nanosecond => duration(size.to_bigint().expect("Conversion should never fail.")),
             Unit::Microsecond => {
@@ -616,41 +627,30 @@ impl Unit {
                     * 1000
                     * 1000,
             ),
-            // FIXME: Number of days per month should not always be 30.
-            Unit::Month => duration(
-                size.to_bigint().expect("Conversion should never fail.")
-                    * 30
-                    * 24
-                    * 60
-                    * 60
-                    * 1000
-                    * 1000
-                    * 1000,
-            ),
-            // FIXME: Number of days per year should not be 365.
-            Unit::Year => duration(
-                size.to_bigint().expect("Conversion should never fail.")
-                    * 365
-                    * 24
-                    * 60
-                    * 60
-                    * 1000
-                    * 1000
-                    * 1000,
-            ),
         }
     }
 }
 
-pub fn filesize(size_in_bytes: impl Into<BigInt>) -> UntaggedValue {
-    UntaggedValue::Primitive(Primitive::Filesize(size_in_bytes.into()))
+pub fn filesize(size_in_bytes: Number) -> UntaggedValue {
+    match size_in_bytes {
+        Number::Int(i) => UntaggedValue::Primitive(Primitive::Filesize(i as u64)),
+        Number::BigInt(bi) => match bi.to_u64() {
+            Some(i) => UntaggedValue::Primitive(Primitive::Filesize(i)),
+            None => UntaggedValue::Error(ShellError::untagged_runtime_error(
+                "Big int too large to convert to filesize",
+            )),
+        },
+        Number::Decimal(_) => UntaggedValue::Error(ShellError::untagged_runtime_error(
+            "Decimal can't convert to filesize",
+        )),
+    }
 }
 
-pub fn duration(nanos: BigInt) -> UntaggedValue {
-    UntaggedValue::Primitive(Primitive::Duration(nanos))
+pub fn duration(nanos: impl Into<BigInt>) -> UntaggedValue {
+    UntaggedValue::Primitive(Primitive::Duration(nanos.into()))
 }
 
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone, Hash, Deserialize, Serialize)]
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Hash, Clone, Deserialize, Serialize)]
 pub struct SpannedExpression {
     pub expr: Expression,
     pub span: Span,
@@ -694,6 +694,36 @@ impl SpannedExpression {
 
     pub fn get_free_variables(&self, known_variables: &mut Vec<String>) -> Vec<String> {
         self.expr.get_free_variables(known_variables)
+    }
+
+    pub fn var_name(&self) -> Result<String, ShellError> {
+        let var_name = match &self.expr {
+            Expression::FullColumnPath(path) => match &path.head.expr {
+                Expression::Variable(v, _) => v,
+                x => {
+                    return Err(ShellError::labeled_error(
+                        format!("Expected a variable (got {:?})", x),
+                        "expected a variable",
+                        self.span,
+                    ))
+                }
+            },
+            Expression::Literal(Literal::String(x)) => x,
+            x => {
+                return Err(ShellError::labeled_error(
+                    format!("Expected a variable (got {:?})", x),
+                    "expected a variable",
+                    self.span,
+                ))
+            }
+        }
+        .to_string();
+
+        if !var_name.starts_with('$') {
+            Ok(format!("${}", var_name))
+        } else {
+            Ok(var_name)
+        }
     }
 }
 
@@ -742,7 +772,7 @@ impl PrettyDebugWithSource for SpannedExpression {
                 Expression::Binary(binary) => binary.pretty_debug(source),
                 Expression::Range(range) => range.pretty_debug(source),
                 Expression::Block(_) => DbgDocBldr::opaque("block"),
-                Expression::Invocation(_) => DbgDocBldr::opaque("invocation"),
+                Expression::Subexpression(_) => DbgDocBldr::opaque("subexpression"),
                 Expression::Garbage => DbgDocBldr::opaque("garbage"),
                 Expression::List(list) => DbgDocBldr::delimit(
                     "[",
@@ -767,7 +797,7 @@ impl PrettyDebugWithSource for SpannedExpression {
                     ),
                     "]",
                 ),
-                Expression::Path(path) => path.pretty_debug(source),
+                Expression::FullColumnPath(path) => path.pretty_debug(source),
                 Expression::FilePath(path) => {
                     DbgDocBldr::typed("path", DbgDocBldr::primitive(path.display()))
                 }
@@ -801,7 +831,7 @@ impl PrettyDebugWithSource for SpannedExpression {
             Expression::Binary(binary) => binary.pretty_debug(source),
             Expression::Range(range) => range.pretty_debug(source),
             Expression::Block(_) => DbgDocBldr::opaque("block"),
-            Expression::Invocation(_) => DbgDocBldr::opaque("invocation"),
+            Expression::Subexpression(_) => DbgDocBldr::opaque("subexpression"),
             Expression::Garbage => DbgDocBldr::opaque("garbage"),
             Expression::List(list) => DbgDocBldr::delimit(
                 "[",
@@ -822,7 +852,7 @@ impl PrettyDebugWithSource for SpannedExpression {
                 ),
                 "]",
             ),
-            Expression::Path(path) => path.pretty_debug(source),
+            Expression::FullColumnPath(path) => path.pretty_debug(source),
             Expression::FilePath(path) => {
                 DbgDocBldr::typed("path", DbgDocBldr::primitive(path.display()))
             }
@@ -1020,12 +1050,12 @@ impl PrettyDebugWithSource for SpannedLiteral {
 }
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone, Hash, new, Deserialize, Serialize)]
-pub struct Path {
+pub struct FullColumnPath {
     pub head: SpannedExpression,
     pub tail: Vec<PathMember>,
 }
 
-impl PrettyDebugWithSource for Path {
+impl PrettyDebugWithSource for FullColumnPath {
     fn pretty_debug(&self, source: &str) -> DebugDocBuilder {
         self.head.pretty_debug(source)
             + DbgDocBldr::operator(".")
@@ -1044,15 +1074,15 @@ pub enum Expression {
     Variable(String, Span),
     Binary(Box<Binary>),
     Range(Box<Range>),
-    Block(hir::Block),
+    Block(Arc<hir::Block>),
     List(Vec<SpannedExpression>),
     Table(Vec<SpannedExpression>, Vec<Vec<SpannedExpression>>),
-    Path(Box<Path>),
+    FullColumnPath(Box<FullColumnPath>),
 
     FilePath(PathBuf),
     ExternalCommand(ExternalStringCommand),
     Command,
-    Invocation(hir::Block),
+    Subexpression(Arc<hir::Block>),
 
     Boolean(bool),
 
@@ -1076,8 +1106,8 @@ impl ShellTypeName for Expression {
             Expression::Binary(..) => "binary",
             Expression::Range(..) => "range",
             Expression::Block(..) => "block",
-            Expression::Invocation(..) => "command invocation",
-            Expression::Path(..) => "variable path",
+            Expression::Subexpression(..) => "subexpression",
+            Expression::FullColumnPath(..) => "variable path",
             Expression::Boolean(..) => "boolean",
             Expression::ExternalCommand(..) => "external",
             Expression::Garbage => "garbage",
@@ -1097,8 +1127,12 @@ impl IntoSpanned for Expression {
 }
 
 impl Expression {
-    pub fn integer(i: BigInt) -> Expression {
+    pub fn integer(i: i64) -> Expression {
         Expression::Literal(Literal::Number(Number::Int(i)))
+    }
+
+    pub fn big_integer(i: BigInt) -> Expression {
+        Expression::Literal(Literal::Number(Number::BigInt(i)))
     }
 
     pub fn decimal(dec: BigDecimal) -> Expression {
@@ -1139,12 +1173,12 @@ impl Expression {
 
     pub fn path(head: SpannedExpression, tail: Vec<impl Into<PathMember>>) -> Expression {
         let tail = tail.into_iter().map(|t| t.into()).collect();
-        Expression::Path(Box::new(Path::new(head, tail)))
+        Expression::FullColumnPath(Box::new(FullColumnPath::new(head, tail)))
     }
 
     pub fn unit(i: Spanned<i64>, unit: Spanned<Unit>) -> Expression {
         Expression::Literal(Literal::Size(
-            Number::Int(BigInt::from(i.item)).spanned(i.span),
+            Number::BigInt(BigInt::from(i.item)).spanned(i.span),
             unit,
         ))
     }
@@ -1165,9 +1199,9 @@ impl Expression {
                     || values.iter().any(|v| v.iter().any(|se| se.has_it_usage()))
             }
             Expression::List(list) => list.iter().any(|se| se.has_it_usage()),
-            Expression::Invocation(block) => block.has_it_usage(),
+            Expression::Subexpression(block) => block.has_it_usage(),
             Expression::Binary(binary) => binary.left.has_it_usage() || binary.right.has_it_usage(),
-            Expression::Path(path) => path.head.has_it_usage(),
+            Expression::FullColumnPath(path) => path.head.has_it_usage(),
             Expression::Range(range) => {
                 (if let Some(left) = &range.left {
                     left.has_it_usage()
@@ -1206,14 +1240,14 @@ impl Expression {
                     output.extend(item.get_free_variables(known_variables));
                 }
             }
-            Expression::Invocation(block) | Expression::Block(block) => {
+            Expression::Subexpression(block) | Expression::Block(block) => {
                 output.extend(block.get_free_variables(known_variables));
             }
             Expression::Binary(binary) => {
                 output.extend(binary.left.get_free_variables(known_variables));
                 output.extend(binary.right.get_free_variables(known_variables));
             }
-            Expression::Path(path) => {
+            Expression::FullColumnPath(path) => {
                 output.extend(path.head.get_free_variables(known_variables));
             }
             Expression::Range(range) => {
@@ -1251,6 +1285,12 @@ impl NamedValue {
             se.get_free_variables(known_variables)
         } else {
             vec![]
+        }
+    }
+    pub fn get_contents(&self) -> Option<&SpannedExpression> {
+        match self {
+            NamedValue::Value(_, expr) => Some(expr),
+            _ => None,
         }
     }
 }
@@ -1305,6 +1345,13 @@ impl Call {
             .as_ref()
             .map(|n| n.switch_present(switch))
             .unwrap_or(false)
+    }
+
+    pub fn get_flag(&self, switch: &str) -> Option<&SpannedExpression> {
+        self.named
+            .as_ref()
+            .and_then(|n| n.get(switch))
+            .and_then(|x| x.get_contents())
     }
 
     pub fn set_initial_flags(&mut self, signature: &crate::Signature) {
@@ -1414,36 +1461,36 @@ pub enum Delimiter {
 
 #[derive(Debug, Copy, Clone)]
 pub enum FlatShape {
-    OpenDelimiter(Delimiter),
+    BareMember,
     CloseDelimiter(Delimiter),
-    Type,
-    Identifier,
-    ItVariable,
-    Variable,
-    Operator,
+    Comment,
+    Decimal,
     Dot,
     DotDot,
     DotDotLeftAngleBracket,
-    InternalCommand,
     ExternalCommand,
     ExternalWord,
-    BareMember,
-    StringMember,
-    String,
-    Path,
-    Word,
-    Keyword,
-    Pipe,
-    GlobPattern,
     Flag,
-    ShorthandFlag,
-    Int,
-    Decimal,
     Garbage,
-    Whitespace,
+    GlobPattern,
+    Identifier,
+    Int,
+    InternalCommand,
+    ItVariable,
+    Keyword,
+    OpenDelimiter(Delimiter),
+    Operator,
+    Path,
+    Pipe,
     Separator,
-    Comment,
+    ShorthandFlag,
     Size { number: Span, unit: Span },
+    String,
+    StringMember,
+    Type,
+    Variable,
+    Whitespace,
+    Word,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,7 +2,7 @@ use crate::whole_stream_command::{whole_stream_command, Command};
 use indexmap::IndexMap;
 use nu_errors::ShellError;
 use nu_parser::ParserScope;
-use nu_protocol::{hir::Block, Value};
+use nu_protocol::{hir::Block, Signature, Value};
 use nu_source::Spanned;
 use std::sync::Arc;
 
@@ -33,6 +33,52 @@ impl Scope {
         None
     }
 
+    pub fn get_aliases(&self) -> IndexMap<String, Vec<Spanned<String>>> {
+        let mut output: IndexMap<String, Vec<Spanned<String>>> = IndexMap::new();
+
+        for frame in self.frames.lock().iter().rev() {
+            for v in frame.aliases.iter() {
+                if !output.contains_key(v.0) {
+                    output.insert(v.0.clone(), v.1.clone());
+                }
+            }
+        }
+
+        output.sorted_by(|k1, _v1, k2, _v2| k1.cmp(k2)).collect()
+    }
+
+    pub fn get_commands(&self) -> IndexMap<String, Signature> {
+        let mut output: IndexMap<String, Signature> = IndexMap::new();
+
+        for frame in self.frames.lock().iter().rev() {
+            for (name, command) in frame.commands.iter() {
+                if !output.contains_key(name) {
+                    let mut sig = command.signature();
+                    // don't show --help and -h in the command arguments for $scope.commands
+                    sig.remove_named("help");
+                    output.insert(name.clone(), sig);
+                }
+            }
+        }
+
+        output.sorted_by(|k1, _v1, k2, _v2| k1.cmp(k2)).collect()
+    }
+
+    pub fn get_vars(&self) -> IndexMap<String, Value> {
+        //FIXME: should this be an iterator?
+        let mut output: IndexMap<String, Value> = IndexMap::new();
+
+        for frame in self.frames.lock().iter().rev() {
+            for v in frame.vars.iter() {
+                if !output.contains_key(v.0) {
+                    output.insert(v.0.clone(), v.1.clone());
+                }
+            }
+        }
+
+        output.sorted_by(|k1, _v1, k2, _v2| k1.cmp(k2)).collect()
+    }
+
     pub fn get_aliases_with_name(&self, name: &str) -> Option<Vec<Vec<Spanned<String>>>> {
         let aliases: Vec<_> = self
             .frames
@@ -48,7 +94,7 @@ impl Scope {
         }
     }
 
-    pub fn get_custom_commands_with_name(&self, name: &str) -> Option<Vec<Block>> {
+    pub fn get_custom_commands_with_name(&self, name: &str) -> Option<Vec<Arc<Block>>> {
         let custom_commands: Vec<_> = self
             .frames
             .lock()
@@ -71,16 +117,34 @@ impl Scope {
         }
     }
 
+    pub fn get_alias_names(&self) -> Vec<String> {
+        let mut names = vec![];
+
+        for frame in self.frames.lock().iter() {
+            let mut frame_command_names = frame.get_alias_names();
+            names.append(&mut frame_command_names);
+        }
+
+        // Sort needs to happen first because dedup works on consecutive dupes only
+        names.sort();
+        names.dedup();
+
+        names
+    }
+
     pub fn get_command_names(&self) -> Vec<String> {
         let mut names = vec![];
 
         for frame in self.frames.lock().iter() {
             let mut frame_command_names = frame.get_command_names();
+            frame_command_names.extend(frame.get_alias_names());
+            frame_command_names.extend(frame.get_custom_command_names());
             names.append(&mut frame_command_names);
         }
 
-        names.dedup();
+        // Sort needs to happen first because dedup works on consecutive dupes only
         names.sort();
+        names.dedup();
 
         names
     }
@@ -120,21 +184,6 @@ impl Scope {
         }
     }
 
-    pub fn get_vars(&self) -> IndexMap<String, Value> {
-        //FIXME: should this be an iterator?
-        let mut output = IndexMap::new();
-
-        for frame in self.frames.lock().iter().rev() {
-            for v in frame.vars.iter() {
-                if !output.contains_key(v.0) {
-                    output.insert(v.0.clone(), v.1.clone());
-                }
-            }
-        }
-
-        output
-    }
-
     pub fn get_env_vars(&self) -> IndexMap<String, String> {
         //FIXME: should this be an iterator?
         let mut output = IndexMap::new();
@@ -148,6 +197,16 @@ impl Scope {
         }
 
         output
+    }
+
+    pub fn get_env(&self, name: &str) -> Option<String> {
+        for frame in self.frames.lock().iter().rev() {
+            if let Some(v) = frame.env.get(name) {
+                return Some(v.clone());
+            }
+        }
+
+        None
     }
 
     pub fn get_var(&self, name: &str) -> Option<Value> {
@@ -197,6 +256,66 @@ impl Scope {
             frame.env.insert(name.into(), value);
         }
     }
+
+    pub fn set_exit_scripts(&self, scripts: Vec<String>) {
+        if let Some(frame) = self.frames.lock().last_mut() {
+            frame.exitscripts = scripts
+        }
+    }
+
+    pub fn enter_scope_with_tag(&self, tag: String) {
+        self.frames.lock().push(ScopeFrame::with_tag(tag));
+    }
+
+    //Removes the scopeframe with tag.
+    pub fn exit_scope_with_tag(&self, tag: &str) {
+        let mut frames = self.frames.lock();
+        let tag = Some(tag);
+        if let Some(i) = frames.iter().rposition(|f| f.tag.as_deref() == tag) {
+            frames.remove(i);
+        }
+    }
+
+    pub fn get_exitscripts_of_frame_with_tag(&self, tag: &str) -> Option<Vec<String>> {
+        let frames = self.frames.lock();
+        let tag = Some(tag);
+        frames.iter().find_map(|f| {
+            if f.tag.as_deref() == tag {
+                Some(f.exitscripts.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn get_frame_with_tag(&self, tag: &str) -> Option<ScopeFrame> {
+        let frames = self.frames.lock();
+        let tag = Some(tag);
+        frames.iter().rev().find_map(|f| {
+            if f.tag.as_deref() == tag {
+                Some(f.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn update_frame_with_tag(&self, frame: ScopeFrame, tag: &str) -> Result<(), ShellError> {
+        let mut frames = self.frames.lock();
+        let tag = Some(tag);
+        for f in frames.iter_mut().rev() {
+            if f.tag.as_deref() == tag {
+                *f = frame;
+                return Ok(());
+            }
+        }
+
+        // Frame not found, return err
+        Err(ShellError::untagged_runtime_error(format!(
+            "Can't update frame with tag {:?}. No such frame present!",
+            tag
+        )))
+    }
 }
 
 impl ParserScope for Scope {
@@ -208,7 +327,7 @@ impl ParserScope for Scope {
         self.get_command(name).is_some()
     }
 
-    fn add_definition(&self, block: Block) {
+    fn add_definition(&self, block: Arc<Block>) {
         if let Some(frame) = self.frames.lock().last_mut() {
             let name = block.params.name.clone();
             frame.custom_commands.insert(name.clone(), block.clone());
@@ -216,7 +335,7 @@ impl ParserScope for Scope {
         }
     }
 
-    fn get_definitions(&self) -> Vec<Block> {
+    fn get_definitions(&self) -> Vec<Arc<Block>> {
         let mut blocks = vec![];
         if let Some(frame) = self.frames.lock().last() {
             for (_, custom_command) in &frame.custom_commands {
@@ -257,8 +376,17 @@ pub struct ScopeFrame {
     pub vars: IndexMap<String, Value>,
     pub env: IndexMap<String, String>,
     pub commands: IndexMap<String, Command>,
-    pub custom_commands: IndexMap<String, Block>,
+    pub custom_commands: IndexMap<String, Arc<Block>>,
     pub aliases: IndexMap<String, Vec<Spanned<String>>>,
+    ///Optional tag to better identify this scope frame later
+    pub tag: Option<String>,
+    pub exitscripts: Vec<String>,
+}
+
+impl Default for ScopeFrame {
+    fn default() -> Self {
+        ScopeFrame::new()
+    }
 }
 
 impl ScopeFrame {
@@ -274,8 +402,16 @@ impl ScopeFrame {
         self.aliases.contains_key(name)
     }
 
+    pub fn get_alias_names(&self) -> Vec<String> {
+        self.aliases.keys().map(|x| x.to_string()).collect()
+    }
+
     pub fn get_command_names(&self) -> Vec<String> {
         self.commands.keys().map(|x| x.to_string()).collect()
+    }
+
+    pub fn get_custom_command_names(&self) -> Vec<String> {
+        self.custom_commands.keys().map(|x| x.to_string()).collect()
     }
 
     pub fn add_command(&mut self, name: String, command: Command) {
@@ -293,89 +429,15 @@ impl ScopeFrame {
             commands: IndexMap::new(),
             custom_commands: IndexMap::new(),
             aliases: IndexMap::new(),
+            tag: None,
+            exitscripts: Vec::new(),
         }
     }
+
+    pub fn with_tag(tag: String) -> ScopeFrame {
+        let mut scope = ScopeFrame::new();
+        scope.tag = Some(tag);
+
+        scope
+    }
 }
-
-// impl Scope {
-//     pub fn vars(&self) -> IndexMap<String, Value> {
-//         //FIXME: should this be an iterator?
-
-//         let mut output = IndexMap::new();
-
-//         for v in &self.vars {
-//             output.insert(v.0.clone(), v.1.clone());
-//         }
-
-//         if let Some(parent) = &self.parent {
-//             for v in parent.vars() {
-//                 if !output.contains_key(&v.0) {
-//                     output.insert(v.0.clone(), v.1.clone());
-//                 }
-//             }
-//         }
-
-//         output
-//     }
-
-//     pub fn env(&self) -> IndexMap<String, String> {
-//         //FIXME: should this be an iterator?
-
-//         let mut output = IndexMap::new();
-
-//         for v in &self.env {
-//             output.insert(v.0.clone(), v.1.clone());
-//         }
-
-//         if let Some(parent) = &self.parent {
-//             for v in parent.env() {
-//                 if !output.contains_key(&v.0) {
-//                     output.insert(v.0.clone(), v.1.clone());
-//                 }
-//             }
-//         }
-
-//         output
-//     }
-
-//     pub fn var(&self, name: &str) -> Option<Value> {
-//         if let Some(value) = self.vars().get(name) {
-//             Some(value.clone())
-//         } else {
-//             None
-//         }
-//     }
-
-//     pub fn append_var(this: Arc<Self>, name: impl Into<String>, value: Value) -> Arc<Scope> {
-//         let mut vars = IndexMap::new();
-//         vars.insert(name.into(), value);
-//         Arc::new(Scope {
-//             vars,
-//             env: IndexMap::new(),
-//             commands: IndexMap::new(),
-//             aliases: IndexMap::new(),
-//             parent: Some(this),
-//         })
-//     }
-
-//     pub fn append_vars(this: Arc<Self>, vars: IndexMap<String, Value>) -> Arc<Scope> {
-//         Arc::new(Scope {
-//             vars,
-//             env: IndexMap::new(),
-//             commands: IndexMap::new(),
-//             aliases: IndexMap::new(),
-//             parent: Some(this),
-//         })
-//     }
-
-//     pub fn append_env(this: Arc<Self>, env: IndexMap<String, String>) -> Arc<Scope> {
-//         Arc::new(Scope {
-//             vars: IndexMap::new(),
-//             env,
-//             commands: IndexMap::new(),
-//             aliases: IndexMap::new(),
-//             parent: Some(this),
-//         })
-//     }
-
-// }

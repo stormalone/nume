@@ -1,4 +1,4 @@
-use crate::value::Value;
+use crate::{value::Value, ConfigPath};
 use nu_errors::ShellError;
 use nu_source::{DbgDocBldr, DebugDocBuilder, PrettyDebug};
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ pub enum CommandAction {
     /// Change to a new directory or path (in non-filesystem situations)
     ChangePath(String),
     /// Exit out of Nu
-    Exit,
+    Exit(i32),
     /// Display an error
     Error(ShellError),
     /// Enter a new shell at the given path
@@ -18,16 +18,18 @@ pub enum CommandAction {
     AutoConvert(Value, String),
     /// Enter a value shell, one that allows exploring inside of a Value
     EnterValueShell(Value),
-    /// Enter the help shell, which allows exploring the help system
-    EnterHelpShell(Value),
     /// Add plugins from path given
     AddPlugins(String),
+    /// Unload the config specified by PathBuf if present
+    UnloadConfig(ConfigPath),
+    /// Load the config specified by PathBuf
+    LoadConfig(ConfigPath),
     /// Go to the previous shell in the shell ring buffer
     PreviousShell,
     /// Go to the next shell in the shell ring buffer
     NextShell,
     /// Leave the current shell. If it's the last shell, exit out of Nu
-    LeaveShell,
+    LeaveShell(i32),
 }
 
 impl PrettyDebug for CommandAction {
@@ -37,7 +39,7 @@ impl PrettyDebug for CommandAction {
             CommandAction::ChangePath(path) => {
                 DbgDocBldr::typed("change path", DbgDocBldr::description(path))
             }
-            CommandAction::Exit => DbgDocBldr::description("exit"),
+            CommandAction::Exit(_) => DbgDocBldr::description("exit"),
             CommandAction::Error(_) => DbgDocBldr::error("error"),
             CommandAction::AutoConvert(_, extension) => {
                 DbgDocBldr::typed("auto convert", DbgDocBldr::description(extension))
@@ -46,11 +48,16 @@ impl PrettyDebug for CommandAction {
                 DbgDocBldr::typed("enter shell", DbgDocBldr::description(s))
             }
             CommandAction::EnterValueShell(v) => DbgDocBldr::typed("enter value shell", v.pretty()),
-            CommandAction::EnterHelpShell(v) => DbgDocBldr::typed("enter help shell", v.pretty()),
             CommandAction::AddPlugins(..) => DbgDocBldr::description("add plugins"),
             CommandAction::PreviousShell => DbgDocBldr::description("previous shell"),
             CommandAction::NextShell => DbgDocBldr::description("next shell"),
-            CommandAction::LeaveShell => DbgDocBldr::description("leave shell"),
+            CommandAction::LeaveShell(_) => DbgDocBldr::description("leave shell"),
+            CommandAction::UnloadConfig(cfg) => {
+                DbgDocBldr::description(format!("unload config {:?}", cfg))
+            }
+            CommandAction::LoadConfig(cfg) => {
+                DbgDocBldr::description(format!("load config {:?}", cfg))
+            }
         }
     }
 }

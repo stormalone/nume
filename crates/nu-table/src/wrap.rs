@@ -1,5 +1,5 @@
 use crate::table::TextStyle;
-use ansi_term::Style;
+use nu_ansi_term::Style;
 use std::collections::HashMap;
 use std::{fmt::Display, iter::Iterator};
 use unicode_width::UnicodeWidthStr;
@@ -62,7 +62,7 @@ pub fn split_sublines(input: &str) -> Vec<Vec<Subline>> {
                     width: {
                         // We've tried UnicodeWidthStr::width(x), UnicodeSegmentation::graphemes(x, true).count()
                         // and x.chars().count() with all types of combinations. Currently, it appears that
-                        // getting the max of char count and unicode width seems to produce the best layout.
+                        // getting the max of char count and Unicode width seems to produce the best layout.
                         // However, it's not perfect.
                         let c = x.chars().count();
                         let u = UnicodeWidthStr::width(x);
@@ -165,7 +165,7 @@ pub fn wrap<'a>(
                     // If this is a really long single word, we need to split the word
                     if current_line.len() == 1 && current_width > cell_width {
                         max_width = cell_width;
-                        let sublines = split_word(cell_width, &current_line[0].subline);
+                        let sublines = split_word(cell_width, current_line[0].subline);
                         for subline in sublines {
                             let width = subline.width;
                             lines.push(Line {
@@ -200,7 +200,7 @@ pub fn wrap<'a>(
             None => {
                 if current_width > cell_width {
                     // We need to break up the last word
-                    let sublines = split_word(cell_width, &current_line[0].subline);
+                    let sublines = split_word(cell_width, current_line[0].subline);
                     for subline in sublines {
                         let width = subline.width;
                         lines.push(Line {
@@ -231,12 +231,11 @@ pub fn wrap<'a>(
             if !first {
                 current_line_width += 1 + subline.width;
                 current_line.push(' ');
-                current_line.push_str(subline.subline);
             } else {
                 first = false;
                 current_line_width = subline.width;
-                current_line.push_str(subline.subline);
             }
+            current_line.push_str(subline.subline);
         }
 
         if current_line_width > current_max {
@@ -252,13 +251,17 @@ pub fn wrap<'a>(
         };
 
         if let Some(leading_match) = re_leading.find(&current_line.clone()) {
-            String::insert_str(&mut current_line, leading_match.end(), "\x1b[0m");
+            String::insert_str(
+                &mut current_line,
+                leading_match.end(),
+                nu_ansi_term::ansi::RESET,
+            );
             String::insert_str(&mut current_line, leading_match.start(), &bg_color_string);
         }
 
         if let Some(trailing_match) = re_trailing.find(&current_line.clone()) {
             String::insert_str(&mut current_line, trailing_match.start(), &bg_color_string);
-            current_line += "\x1b[0m";
+            current_line += nu_ansi_term::ansi::RESET;
         }
 
         output.push(WrappedLine {
